@@ -1,9 +1,11 @@
 import streamlit as st
 import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 import datetime
+from alpha_vantage.fundamentaldata import FundamentalData
+
+# Alpha Vantage API Key
+API_KEY = "NM94KM6O8CUADMP9"  # Replace this with your API key
 
 # Function to fetch historical stock prices
 def get_stock_data(ticker):
@@ -11,34 +13,26 @@ def get_stock_data(ticker):
     history = stock.history(period="5y")  # Get 5 years of data
     return history
 
-# Function to scrape EPS data from Nasdaq
+# Function to fetch EPS data from Alpha Vantage
 def get_eps_data(ticker):
-    url = f"https://www.nasdaq.com/market-activity/stocks/{ticker}/earnings"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    fd = FundamentalData(API_KEY, output_format="json")
 
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        return None
+    try:
+        data, _ = fd.get_earnings(ticker)  # Fetch earnings data
+        eps_data = []
 
-    soup = BeautifulSoup(response.text, "lxml")
-
-    # Extract historical and estimated EPS values
-    eps_data = []
-    rows = soup.find_all("tr")
-
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) >= 3:
+        for q in data['quarterlyEarnings']:
             try:
-                date = cols[0].text.strip()
-                eps = float(cols[1].text.strip())  # Convert EPS to float
-                eps_data.append((date, eps * 15))  # Multiply EPS by 15
-            except:
-                continue
+                date = q['fiscalDateEnding']
+                eps = float(q['reportedEPS']) * 15  # Multiply EPS by 15
+                eps_data.append((date, eps))
+            except ValueError:
+                continue  # Skip invalid data
 
-    return eps_data
+        return eps_data
+    except Exception as e:
+        st.error(f"Error fetching EPS data: {e}")
+        return None
 
 # Streamlit UI
 st.title("📈 Stock Price & EPS-Based Valuation Dashboard")
@@ -66,7 +60,7 @@ if st.button("Generate Chart"):
 
         # Plot EPS estimates if available
         if eps_data:
-            eps_dates, eps_values = zip(*[(datetime.datetime.strptime(d, "%m/%d/%Y"), v) for d, v in eps_data])
+            eps_dates, eps_values = zip(*[(datetime.datetime.strptime(d, "%Y-%m-%d"), v) for d, v in eps_data])
             ax.plot(eps_dates, eps_values, label="EPS x 15 (Fair Value)", color="red", linestyle="dashed")
 
         ax.set_title(f"{ticker} Stock Price vs EPS Fair Value")
