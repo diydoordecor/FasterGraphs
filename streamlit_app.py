@@ -1,38 +1,57 @@
 import streamlit as st
 import yfinance as yf
+import requests
 import matplotlib.pyplot as plt
 import datetime
-from alpha_vantage.fundamentaldata import FundamentalData
 
 # Alpha Vantage API Key
-API_KEY = "NM94KM6O8CUADMP9"  # Replace this with your API key
+API_KEY = "NM94KM6O8CUADMP9"  # Replace with your actual API key
 
-# Function to fetch historical stock prices
-def get_stock_data(ticker):
-    stock = yf.Ticker(ticker)
-    history = stock.history(period="5y")  # Get 5 years of data
-    return history
-
-# Function to fetch EPS data from Alpha Vantage
+# Function to fetch EPS data from Alpha Vantage API directly
 def get_eps_data(ticker):
-    fd = FundamentalData(API_KEY, output_format="json")
-
+    url = f"https://www.alphavantage.co/query?function=EARNINGS&symbol={ticker}&apikey={API_KEY}"
+    
     try:
-        data, _ = fd.get_earnings(ticker)  # Fetch earnings data
+        response = requests.get(url)
+        data = response.json()
+
+        # Ensure response has earnings data
+        if "annualEarnings" not in data:
+            return None, None
+
         eps_data = []
-
-        for q in data['quarterlyEarnings']:
+        earliest_eps_date = None
+        
+        # Extract EPS from "annualEarnings"
+        for item in data["annualEarnings"]:
             try:
-                date = q['fiscalDateEnding']
-                eps = float(q['reportedEPS']) * 15  # Multiply EPS by 15
+                date = item["fiscalDateEnding"]
+                eps = float(item["reportedEPS"]) * 15  # Multiply EPS by 15 for fair value estimate
                 eps_data.append((date, eps))
-            except ValueError:
-                continue  # Skip invalid data
 
-        return eps_data
+                # Track earliest EPS date
+                if earliest_eps_date is None or date < earliest_eps_date:
+                    earliest_eps_date = date
+            except ValueError:
+                continue  # Skip invalid entries
+        
+        return eps_data, earliest_eps_date
     except Exception as e:
         st.error(f"Error fetching EPS data: {e}")
-        return None
+        return None, None
+
+# Function to fetch historical stock prices, aligned with EPS data
+def get_stock_data(ticker, start_date):
+    stock = yf.Ticker(ticker)
+    
+    # Convert start_date from string to datetime object
+    if start_date:
+        start_date = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        start_date = "2000-01-01"  # Default if no EPS data is available
+
+    history = stock.history(start=start_date, period="max")  # Fetch stock data from earliest EPS date
+    return history
 
 # Streamlit UI
 st.title("📈 Stock Price & EPS-Based Valuation Dashboard")
@@ -40,18 +59,19 @@ st.title("📈 Stock Price & EPS-Based Valuation Dashboard")
 ticker = st.text_input("Enter a Stock Ticker (e.g., AAPL, TSLA, IREN)", "AAPL").upper()
 
 if st.button("Generate Chart"):
-    # Fetch stock price data
-    stock_data = get_stock_data(ticker)
+    # Fetch EPS data first (to get the earliest EPS date)
+    eps_data, earliest_eps_date = get_eps_data(ticker)
+
+    if not eps_data:
+        st.warning("Could not retrieve EPS data. Proceeding with stock prices only.")
+        earliest_eps_date = None  # No restriction on stock data
+
+    # Fetch stock price data (limited to the earliest EPS date)
+    stock_data = get_stock_data(ticker, earliest_eps_date)
 
     if stock_data is None or stock_data.empty:
         st.error("Stock data not found. Please enter a valid ticker.")
     else:
-        # Fetch EPS data
-        eps_data = get_eps_data(ticker)
-
-        if not eps_data:
-            st.warning("Could not retrieve EPS data. Proceeding with stock prices only.")
-
         # Plot data
         fig, ax = plt.subplots(figsize=(10, 5))
 

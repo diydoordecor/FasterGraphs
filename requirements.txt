@@ -5,3 +5,4 @@ requests
 matplotlib
 lxml
 alpha_vantage
+datetime
