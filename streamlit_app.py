@@ -38,7 +38,53 @@ def get_eps_data(ticker):
         st.error(f"Error fetching EPS data: {e}")
         return None, None
 
-# Function to fetch historical stock prices, aligned with EPS data
+# Function to fetch Operating Cash Flow (OCF) data
+def get_ocf_data(ticker):
+    url = f"https://www.alphavantage.co/query?function=CASH_FLOW&symbol={ticker}&apikey={API_KEY}"
+    
+    try:
+        response = requests.get(url)
+        data = response.json()
+
+        if "annualReports" not in data:
+            return None, None
+
+        ocf_data = []
+        earliest_ocf_date = None
+
+        for item in data["annualReports"]:
+            try:
+                date = item["fiscalDateEnding"]
+                ocf = float(item["operatingCashflow"])  # Extract Operating Cash Flow
+                ocf_data.append((date, ocf))
+
+                if earliest_ocf_date is None or date < earliest_ocf_date:
+                    earliest_ocf_date = date
+            except (ValueError, KeyError, TypeError):
+                continue  # Skip invalid entries
+        
+        return ocf_data, earliest_ocf_date
+    except Exception as e:
+        st.error(f"Error fetching Operating Cash Flow data: {e}")
+        return None, None
+
+# Function to fetch Shares Outstanding from the Company Overview API
+def get_shares_outstanding(ticker):
+    url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={API_KEY}"
+    
+    try:
+        response = requests.get(url)
+        data = response.json()
+
+        if "SharesOutstanding" not in data:
+            return None
+
+        return float(data["SharesOutstanding"])
+    except Exception as e:
+        st.error(f"Error fetching Shares Outstanding: {e}")
+        return None
+
+# Function to fetch historical stock prices, aligned with financial data
 def get_stock_data(ticker, start_date):
     stock = yf.Ticker(ticker)
     
@@ -51,43 +97,12 @@ def get_stock_data(ticker, start_date):
     history.index = history.index.tz_localize(None)  # Convert timezone-aware index to naive
     return history
 
-# Function to calculate average P/E ratios over different timeframes
-def calculate_pe_averages(eps_data, stock_data):
-    if not eps_data or stock_data.empty:
-        return None
-
-    eps_data.sort(reverse=True, key=lambda x: x[0])  # Sort by date descending
-    today = datetime.datetime.today()
-
-    pe_ratios = []
-
-    for date, eps in eps_data:
-        date_obj = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=None)  # Ensure EPS date is timezone-naive
-        
-        # Find closest stock price for that EPS date
-        closest_date = min(stock_data.index, key=lambda d: abs(d.to_pydatetime().replace(tzinfo=None) - date_obj))
-        stock_price = stock_data.loc[closest_date]["Close"]
-
-        if eps > 0:  # Avoid division by zero
-            pe_ratios.append((date, stock_price / eps))
-
-    pe_full = [v for _, v in pe_ratios]
-    pe_10yr = [v for d, v in pe_ratios if (today - datetime.datetime.strptime(d, "%Y-%m-%d")).days <= 3650]
-    pe_5yr = [v for d, v in pe_ratios if (today - datetime.datetime.strptime(d, "%Y-%m-%d")).days <= 1825]
-    pe_3yr = [v for d, v in pe_ratios if (today - datetime.datetime.strptime(d, "%Y-%m-%d")).days <= 1095]
-
-    return {
-        "Full timeframe": np.mean(pe_full) if pe_full else None,
-        "Last 10 years": np.mean(pe_10yr) if pe_10yr else None,
-        "Last 5 years": np.mean(pe_5yr) if pe_5yr else None,
-        "Last 3 years": np.mean(pe_3yr) if pe_3yr else None
-    }
-
 # Streamlit UI
-st.title("📈 Stock Price & EPS-Based Valuation Dashboard (Log Scale)")
+st.title("📈 Stock Price & Fundamental-Based Valuation Dashboard (Log Scale)")
 
 ticker = st.text_input("Enter a Stock Ticker (e.g., AAPL, TSLA, IREN)", "AAPL").upper()
-multiple = st.number_input("Enter EPS Multiple (e.g., 15, 20, 25)", min_value=1, value=15, step=1)
+multiple_eps = st.number_input("Enter EPS Multiple (e.g., 15, 20, 25)", min_value=1, value=15, step=1)
+multiple_ocfps = st.number_input("Enter OCFPS Multiple (e.g., 10, 15, 20)", min_value=1, value=10, step=1)
 
 if st.button("Generate Chart"):
     # Fetch EPS data
@@ -97,8 +112,27 @@ if st.button("Generate Chart"):
         st.warning("Could not retrieve EPS data. Proceeding with stock prices only.")
         earliest_eps_date = None  # No restriction on stock data
 
-    # Fetch stock price data (limited to the earliest EPS date)
-    stock_data = get_stock_data(ticker, earliest_eps_date)
+    # Fetch Operating Cash Flow data
+    ocf_data, earliest_ocf_date = get_ocf_data(ticker)
+
+    if not ocf_data:
+        st.warning("Could not retrieve Operating Cash Flow data.")
+        earliest_ocf_date = None  # No restriction on stock data
+
+    # Fetch Shares Outstanding
+    shares_outstanding = get_shares_outstanding(ticker)
+
+    if not shares_outstanding:
+        st.warning("Could not retrieve Shares Outstanding data.")
+
+    # Calculate OCFPS (Operating Cash Flow Per Share)
+    ocfps_data = [(date, ocf / shares_outstanding) for date, ocf in ocf_data if shares_outstanding]
+
+    # Determine earliest available financial data
+    earliest_date = min(filter(None, [earliest_eps_date, earliest_ocf_date]))
+
+    # Fetch stock price data (limited to the earliest financial data date)
+    stock_data = get_stock_data(ticker, earliest_date)
 
     if stock_data is None or stock_data.empty:
         st.error("Stock data not found. Please enter a valid ticker.")
@@ -109,8 +143,8 @@ if st.button("Generate Chart"):
         ax1.set_yscale("log")
 
         if eps_data:
-            eps_dates, eps_values = zip(*[(datetime.datetime.strptime(d, "%Y-%m-%d"), v * multiple) for d, v in eps_data])
-            ax1.plot(eps_dates, eps_values, label=f"EPS x {multiple} (Fair Value)", color="red", linestyle="dashed")
+            eps_dates, eps_values = zip(*[(datetime.datetime.strptime(d, "%Y-%m-%d"), v * multiple_eps) for d, v in eps_data])
+            ax1.plot(eps_dates, eps_values, label=f"EPS x {multiple_eps} (Fair Value)", color="red", linestyle="dashed")
 
         ax1.set_title(f"{ticker} Stock Price vs EPS Fair Value (Log Scale)")
         ax1.set_xlabel("Date")
@@ -120,11 +154,19 @@ if st.button("Generate Chart"):
 
         st.pyplot(fig)
 
-        # ---- Display Average P/E Ratios ----
-        pe_averages = calculate_pe_averages(eps_data, stock_data)
-        if pe_averages:
-            st.subheader("📊 Average Annual P/E Ratios")
-            st.write(f"**Full timeframe:** {pe_averages['Full timeframe']:.2f}")
-            st.write(f"**Last 10 years:** {pe_averages['Last 10 years']:.2f}")
-            st.write(f"**Last 5 years:** {pe_averages['Last 5 years']:.2f}")
-            st.write(f"**Last 3 years:** {pe_averages['Last 3 years']:.2f}")
+        # ---- OCFPS-Based Valuation Chart ----
+        fig, ax2 = plt.subplots(figsize=(10, 6))
+        ax2.plot(stock_data.index, stock_data["Close"], label="Stock Price", color="blue")
+        ax2.set_yscale("log")
+
+        if ocfps_data:
+            ocfps_dates, ocfps_values = zip(*[(datetime.datetime.strptime(d, "%Y-%m-%d"), v * multiple_ocfps) for d, v in ocfps_data])
+            ax2.plot(ocfps_dates, ocfps_values, label=f"OCFPS x {multiple_ocfps} (Fair Value)", color="green", linestyle="dashed")
+
+        ax2.set_title(f"{ticker} Stock Price vs OCFPS Fair Value (Log Scale)")
+        ax2.set_xlabel("Date")
+        ax2.set_ylabel("Price ($) - Log Scale")
+        ax2.legend()
+        ax2.grid(True, which="both", linestyle="--", linewidth=0.5)
+
+        st.pyplot(fig)
