@@ -126,10 +126,20 @@ if st.button("Generate Chart"):
         st.warning("Could not retrieve Shares Outstanding data.")
 
     # Calculate OCFPS (Operating Cash Flow Per Share)
-    ocfps_data = [(date, ocf / shares_outstanding) for date, ocf in ocf_data if shares_outstanding]
+    ocfps_data = []
+    if ocf_data and shares_outstanding:
+        ocfps_data = [(date, ocf / shares_outstanding) for date, ocf in ocf_data]
+    else:
+        st.warning("Missing data: Could not calculate OCFPS.")
 
     # Determine earliest available financial data
-    earliest_date = min(filter(None, [earliest_eps_date, earliest_ocf_date]))
+    valid_dates = list(filter(None, [earliest_eps_date, earliest_ocf_date]))
+
+    if valid_dates:
+        earliest_date = min(valid_dates)
+    else:
+        st.warning("No financial data available. Using default start date.")
+        earliest_date = "2000-01-01"
 
     # Fetch stock price data (limited to the earliest financial data date)
     stock_data = get_stock_data(ticker, earliest_date)
