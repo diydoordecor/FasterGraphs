@@ -6,3 +6,5 @@ matplotlib
 lxml
 alpha_vantage
 datetime
+numpy
+plotly

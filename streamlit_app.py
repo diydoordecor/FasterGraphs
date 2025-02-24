@@ -4,6 +4,7 @@ import requests
 import matplotlib.pyplot as plt
 import datetime
 import numpy as np
+import plotly.graph_objects as go
 
 # Alpha Vantage API Key
 API_KEY = "NM94KM6O8CUADMP9"  # Replace with your actual API key
@@ -31,7 +32,7 @@ def get_eps_data(ticker):
                 if earliest_eps_date is None or date < earliest_eps_date:
                     earliest_eps_date = date
             except ValueError:
-                continue  # Skip invalid entries
+                continue
         
         return eps_data, earliest_eps_date
     except Exception as e:
@@ -55,13 +56,13 @@ def get_ocf_data(ticker):
         for item in data["annualReports"]:
             try:
                 date = item["fiscalDateEnding"]
-                ocf = float(item["operatingCashflow"])  
+                ocf = float(item["operatingCashflow"])
                 ocf_data.append((date, ocf))
 
                 if earliest_ocf_date is None or date < earliest_ocf_date:
                     earliest_ocf_date = date
             except (ValueError, KeyError, TypeError):
-                continue  # Skip invalid entries
+                continue 
         
         return ocf_data, earliest_ocf_date
     except Exception as e:
@@ -94,18 +95,34 @@ def get_stock_data(ticker, start_date):
         start_date = "2000-01-01"
 
     history = stock.history(start=start_date, period="max")
-    history.index = history.index.tz_localize(None)  
+    history.index = history.index.tz_localize(None)
     return history
+
+# Function to calculate historical average multiples
+def calculate_average_multiple(financial_data, stock_data):
+    pe_ratios = []
+
+    for date, value in financial_data:
+        date_obj = datetime.datetime.strptime(date, "%Y-%m-%d")
+        
+        closest_date = min(stock_data.index, key=lambda d: abs(d - date_obj))
+        stock_price = stock_data.loc[closest_date]["Close"]
+
+        if value > 0:
+            pe_ratios.append(stock_price / value)
+
+    if len(pe_ratios) > 1:
+        return np.mean(pe_ratios[:-1])  # Exclude the most recent data point
+    return None
 
 # Streamlit UI
 st.title("📈 Stock Price & Valuation Dashboard")
 
 ticker = st.text_input("Enter a Stock Ticker (e.g., AAPL, TSLA, IREN)", "AAPL").upper()
 valuation_method = st.selectbox("Select Valuation Method:", ["Earnings", "Operating Cash Flow"])
-multiple = st.number_input("Enter Multiple (e.g., 10, 15, 20)", min_value=1, value=15, step=1)
 
-if st.button("Generate Chart"):
-    # Determine which data to use
+if st.button("Fetch Data"):
+    # Fetch selected financial data
     if valuation_method == "Earnings":
         financial_data, earliest_date = get_eps_data(ticker)
         label = "EPS"
@@ -123,30 +140,55 @@ if st.button("Generate Chart"):
         else:
             financial_data, earliest_date = None, None
 
-    # Handle missing data
-    if not financial_data:
-        st.warning(f"Could not retrieve {valuation_method} data. Proceeding with stock prices only.")
-        earliest_date = None
-
     # Fetch stock price data
     stock_data = get_stock_data(ticker, earliest_date)
 
-    if stock_data is None or stock_data.empty:
-        st.error("Stock data not found. Please enter a valid ticker.")
-    else:
-        # ---- Valuation Chart ----
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(stock_data.index, stock_data["Close"], label="Stock Price", color="blue")
-        ax.set_yscale("log")
+    if financial_data and stock_data is not None and not stock_data.empty:
+        avg_multiple = calculate_average_multiple(financial_data, stock_data)
+        if avg_multiple:
+            multiple = st.number_input("Enter Multiple", min_value=1, value=int(avg_multiple), step=1)
+        else:
+            multiple = st.number_input("Enter Multiple", min_value=1, value=15, step=1)
 
+        # Interactive date range selector
+        date_range = st.slider("Select Date Range:", min_value=stock_data.index[0].date(), 
+                               max_value=stock_data.index[-1].date(), 
+                               value=(stock_data.index[0].date(), stock_data.index[-1].date()))
+
+        # Filter stock data for selected range
+        filtered_stock_data = stock_data.loc[str(date_range[0]):str(date_range[1])]
+
+        # Create interactive chart
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=filtered_stock_data.index, y=filtered_stock_data["Close"], 
+                                 mode='lines', name="Stock Price", line=dict(color="blue")))
+
+        # Calculate and plot fair value line
         if financial_data:
             dates, values = zip(*[(datetime.datetime.strptime(d, "%Y-%m-%d"), v * multiple) for d, v in financial_data])
-            ax.plot(dates, values, label=f"{label} x {multiple} (Fair Value)", color="red", linestyle="dashed")
+            fair_value_dates = [d for d in dates if d >= date_range[0] and d <= date_range[1]]
+            fair_values = [values[i] for i in range(len(dates)) if dates[i] >= date_range[0] and dates[i] <= date_range[1]]
 
-        ax.set_title(f"{ticker} Stock Price vs {label} Fair Value (Log Scale)")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Price ($) - Log Scale")
-        ax.legend()
-        ax.grid(True, which="both", linestyle="--", linewidth=0.5)
+            fig.add_trace(go.Scatter(x=fair_value_dates, y=fair_values, 
+                                     mode='lines', name=f"{label} x {multiple} (Fair Value)", 
+                                     line=dict(color="red", dash="dash")))
 
-        st.pyplot(fig)
+        fig.update_layout(title=f"{ticker} Stock Price vs {label} Fair Value",
+                          xaxis_title="Date", yaxis_title="Price ($)", yaxis_type="log",
+                          hovermode="x unified")
+
+        st.plotly_chart(fig)
+
+        # CAGR calculation section
+        st.subheader("📊 CAGR Calculator")
+        start_date = st.date_input("Select Start Date:", min_value=stock_data.index[0].date(), 
+                                   max_value=stock_data.index[-1].date(), value=stock_data.index[0].date())
+        end_date = st.date_input("Select End Date:", min_value=start_date, max_value=stock_data.index[-1].date(),
+                                 value=stock_data.index[-1].date())
+
+        start_price = stock_data.loc[str(start_date)]["Close"]
+        end_price = stock_data.loc[str(end_date)]["Close"]
+        years = (end_date - start_date).days / 365.25
+        cagr = ((end_price / start_price) ** (1 / years) - 1) * 100
+
+        st.write(f"CAGR from {start_date} to {end_date}: **{cagr:.2f}%**")
